@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "computer-agent-mcp"
+version = "0.1.0"
+description = "Stateless black-box computer-use MCP powered by a vision worker."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=2.20.0",
+  "mcp[cli]>=1.13.0",
+  "pydantic>=2.8.0",
+  "mss>=10.0.0",
+  "Pillow>=10.4.0",
+  "pynput>=1.7.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+computer-agent-mcp = "computer_agent_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

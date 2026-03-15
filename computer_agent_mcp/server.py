@@ -45,6 +45,52 @@ def _text_result(structured_model, text_summary: str, *, is_error: bool = False)
     )
 
 
+def _format_run_result_text(result: RunResult) -> str:
+    lines = [
+        result.summary,
+    ]
+    if result.details:
+        lines.extend(["", result.details])
+    lines.extend(
+        [
+            "",
+            f"status: {result.status}",
+            f"run_id: {result.run_id}",
+            f"steps_executed: {result.steps_executed}",
+        ]
+    )
+    if result.trace:
+        lines.append("trace:")
+        for index, trace_step in enumerate(result.trace, start=1):
+            if index > 1:
+                lines.append("")
+            lines.append(f"Step {trace_step.step_index}")
+            if trace_step.observation:
+                lines.append(f"observation: {trace_step.observation}")
+            lines.append(f"summary: {trace_step.summary}")
+            if trace_step.actions:
+                action_text = "; ".join(
+                    ComputerAgentRunner._describe_action(action) for action in trace_step.actions
+                )
+            else:
+                action_text = "none"
+            lines.append(f"actions: {action_text}")
+            if trace_step.expected_outcome:
+                lines.append(f"expected_outcome: {trace_step.expected_outcome}")
+            lines.append(f"execution_status: {trace_step.execution_status or 'unknown'}")
+            if trace_step.execution_message:
+                lines.append(f"execution_message: {trace_step.execution_message}")
+            lines.append(
+                f"resulting_window_title: {trace_step.resulting_window_title or 'unknown'}"
+            )
+    if result.next_user_action:
+        lines.extend(["", f"next_user_action: {result.next_user_action}"])
+    if result.warnings:
+        lines.extend(["", "warnings:"])
+        lines.extend(f"- {warning}" for warning in result.warnings)
+    return "\n".join(lines)
+
+
 def build_arg_parser() -> ArgumentParser:
     parser = ArgumentParser(description="computer-agent-mcp server")
     parser.add_argument("--api-key", dest="openai_api_key", default=None)
@@ -109,7 +155,8 @@ mcp = FastMCP(
     instructions=(
         "This server exposes a stateless black-box computer-use task tool. "
         "Use computer_use_task for desktop work. Each call starts fresh from the current screen and must fully describe the task. "
-        "The server does not keep resumable task state across calls, and a newer task may supersede an older in-flight task."
+        "The server does not keep resumable task state across calls, and a newer task may supersede an older in-flight task. "
+        "If a run stops with block_reason=human_override, do not automatically retry. Ask the user what changed and whether to continue from the current screen."
     ),
     lifespan=app_lifespan,
 )
@@ -139,7 +186,8 @@ async def computer_list_displays(ctx: Context) -> CallToolResult:
     description=(
         "Run a stateless black-box computer-use task on the local desktop. "
         "The server captures the current screen, plans actions with an internal vision model, executes locally, "
-        "and returns only the task-level result. Each call must describe the full task from the current screen."
+        "and returns only the task-level result. Each call must describe the full task from the current screen. "
+        "If the result is blocked with block_reason=human_override, the caller should stop and ask the user why they intervened before deciding whether to call the tool again."
     )
 )
 async def computer_use_task(
@@ -162,10 +210,11 @@ async def computer_use_task(
         await ctx.report_progress(progress, total, message=message)
 
     result: RunResult = await app.runner.run(request, progress_callback=progress_callback)
-    summary = result.summary
-    if result.status == "blocked" and result.next_user_action:
-        summary = f"{summary}\n\nNext: {result.next_user_action}"
-    return _text_result(result, text_summary=summary, is_error=result.status == "failed")
+    return _text_result(
+        result,
+        text_summary=_format_run_result_text(result),
+        is_error=result.status == "failed",
+    )
 
 
 def main() -> None:

@@ -1,6 +1,6 @@
 from computer_agent_mcp.config import ServerConfig
 from computer_agent_mcp.executor import ActionExecutor
-from computer_agent_mcp.models import DisplayInfo
+from computer_agent_mcp.models import DisplayInfo, ScrollAction
 
 
 class PassiveMonitor:
@@ -55,3 +55,17 @@ def test_map_point_scales_from_worker_image_to_target_display():
     )()
     mapped = executor._map_point(state, 1000, 500, source_width=2000, source_height=1000)
     assert mapped == (500, 250)
+
+
+def test_semantic_scroll_delta_uses_direction_and_amount():
+    executor = ActionExecutor(
+        adapter=DummyAdapter(),
+        monitor=PassiveMonitor(),
+        config=ServerConfig(),
+    )
+    assert executor._semantic_scroll_delta(
+        ScrollAction(x=100, y=100, direction="down", amount=900)
+    ) == (0, 900)
+    assert executor._semantic_scroll_delta(
+        ScrollAction(x=100, y=100, direction="up", amount=300)
+    ) == (0, -300)

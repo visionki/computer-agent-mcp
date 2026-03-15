@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from hashlib import sha256
 from io import BytesIO
@@ -18,11 +19,10 @@ from computer_agent_mcp.executor import ActionExecutor
 from computer_agent_mcp.models import (
     ComputerAction,
     ComputerTaskArgs,
-    CursorInfo,
     DesktopState,
-    DisplayInfo,
     ModelPlanContext,
     RunResult,
+    TraceStep,
 )
 from computer_agent_mcp.openai_adapter import ModelAdapter, ModelResponseError
 from computer_agent_mcp.platform_base import DesktopAdapter
@@ -36,6 +36,7 @@ class _RunState:
     max_steps: int
     warnings: list[str]
     history: list[str] = field(default_factory=list)
+    trace: list[TraceStep] = field(default_factory=list)
     stalled_action_signature: str | None = None
     stalled_count: int = 0
 
@@ -114,10 +115,11 @@ class ComputerAgentRunner:
         cancel_event: Event,
     ) -> RunResult:
         max_steps = request.max_steps if request.max_steps is not None else self.config.max_steps_default
-        total_progress = float(max_steps * 4 + 4)
         progress_value = 0.0
+        loop = asyncio.get_running_loop()
         start_time = self._monotonic_fn()
         deadline_monotonic = start_time + self.config.max_duration_s_default
+        steps_executed = 0
         state = _RunState(
             run_id=run_id,
             task=request.task,
@@ -152,65 +154,93 @@ class ComputerAgentRunner:
         async def emit_progress(message: str) -> None:
             nonlocal progress_value
             progress_value += 1.0
+            run_debug.record(
+                "run.progress",
+                {
+                    "sequence": int(progress_value),
+                    "message": message,
+                },
+            )
             if progress_callback is not None:
-                await progress_callback(progress_value, total_progress, message)
+                await progress_callback(progress_value, None, message)
+
+        def emit_progress_from_thread(message: str) -> None:
+            future = asyncio.run_coroutine_threadsafe(emit_progress(message), loop)
+            with suppress(Exception):
+                future.result()
 
         def was_superseded() -> bool:
             return cancel_event.is_set()
+
+        def dedupe_warnings(*warning_sets: list[str]) -> list[str]:
+            warnings: list[str] = list(self.startup_warnings)
+            for warning_set in warning_sets:
+                warnings.extend(warning_set)
+            return list(dict.fromkeys(warnings))
+
+        def snapshot_trace() -> list[TraceStep]:
+            return [trace_step.model_copy(deep=True) for trace_step in state.trace]
+
+        async def finish(
+            status: str,
+            summary: str,
+            *,
+            details: str | None = None,
+            block_reason: str | None = None,
+            next_user_action: str | None = None,
+            warnings: list[str] | None = None,
+            progress_message: str | None = "Finished",
+        ) -> RunResult:
+            if progress_message:
+                await emit_progress(progress_message)
+            return self._finish(
+                run_debug,
+                RunResult(
+                    status=status,
+                    summary=summary,
+                    details=details,
+                    run_id=run_id,
+                    steps_executed=steps_executed,
+                    block_reason=block_reason,
+                    next_user_action=next_user_action,
+                    warnings=dedupe_warnings(warnings or []),
+                    trace=snapshot_trace(),
+                ),
+            )
 
         try:
             await emit_progress("Capturing current screen")
             current_state = await self._capture_state(request.display_id, run_debug)
         except Exception as exc:
-            return self._finish(
-                run_debug,
-                RunResult(
-                    status="failed",
-                    summary=f"Failed to capture the current screen: {exc}",
-                    run_id=run_id,
-                    warnings=list(self.startup_warnings),
-                ),
+            return await finish(
+                "failed",
+                f"Failed to capture the current screen: {exc}",
+                warnings=list(self.startup_warnings),
             )
 
-        steps_executed = 0
         for step_index in range(1, max_steps + 1):
             if was_superseded():
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary="Execution stopped because a newer task superseded this run.",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        block_reason="superseded",
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "failed",
+                    "Execution stopped because a newer task superseded this run.",
+                    block_reason="superseded",
+                    warnings=current_state.warnings,
                 )
             if self.config.kill_switch_active():
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="blocked",
-                        summary="Execution stopped by the configured kill switch.",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        block_reason="environment_error",
-                        next_user_action="Remove the kill switch and rerun the task from the current screen.",
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "blocked",
+                    "Execution stopped by the configured kill switch.",
+                    block_reason="environment_error",
+                    next_user_action="Remove the kill switch and rerun the task from the current screen.",
+                    warnings=current_state.warnings,
                 )
             if self._monotonic_fn() > deadline_monotonic:
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="blocked",
-                        summary="The task hit the configured time limit before completion.",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        block_reason="timeout",
-                        next_user_action="Submit a new task from the current screen if more work is needed.",
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "blocked",
+                    "The task hit the configured time limit before completion.",
+                    block_reason="timeout",
+                    next_user_action="Submit a new task from the current screen if more work is needed.",
+                    warnings=current_state.warnings,
                 )
 
             context = ModelPlanContext(
@@ -218,45 +248,35 @@ class ComputerAgentRunner:
                 task=request.task,
                 step_index=step_index,
                 max_steps=max_steps,
-                recent_history=list(state.history[-4:]),
-                warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
+                recent_history=list(state.history[-6:]),
+                warnings=dedupe_warnings(current_state.warnings),
             )
-            await emit_progress(f"Planning step {step_index}")
+            await emit_progress(f"Requesting vision worker for step {step_index}")
             try:
-                decision = await self.model_adapter.plan_step(context, current_state, run_debug)
+                decision = await self._plan_step_with_progress(
+                    context=context,
+                    current_state=current_state,
+                    run_debug=run_debug,
+                    emit_progress=emit_progress,
+                )
             except ModelResponseError as exc:
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary=f"Vision worker returned an invalid decision: {exc}",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "failed",
+                    f"Vision worker returned an invalid decision: {exc}",
+                    warnings=current_state.warnings,
                 )
             except Exception as exc:
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary=f"Vision worker request failed: {exc}",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "failed",
+                    f"Vision worker request failed: {exc}",
+                    warnings=current_state.warnings,
                 )
             if was_superseded():
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary="Execution stopped because a newer task superseded this run.",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        block_reason="superseded",
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "failed",
+                    "Execution stopped because a newer task superseded this run.",
+                    block_reason="superseded",
+                    warnings=current_state.warnings,
                 )
 
             run_debug.record(
@@ -266,46 +286,40 @@ class ComputerAgentRunner:
                     "decision": decision.model_dump(mode="json", by_alias=True),
                 },
             )
-            state.history.append(
-                "Step "
-                f"{step_index}: {decision.summary} "
-                f"[image={decision.image_width}x{decision.image_height}]"
+            trace_step = TraceStep(
+                step_index=step_index,
+                observation=decision.observation,
+                summary=decision.summary,
+                expected_outcome=decision.expected_outcome,
+                actions=[action.model_copy(deep=True) for action in decision.actions],
+                execution_status="planned" if decision.status == "act" else decision.status,
+                resulting_window_title=current_state.active_window_title,
+                resulting_active_app=current_state.active_app,
             )
+            state.trace.append(trace_step)
 
             if decision.status == "completed":
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="completed",
-                        summary=decision.summary,
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "completed",
+                    decision.summary,
+                    details=decision.details,
+                    warnings=current_state.warnings,
                 )
             if decision.status == "blocked":
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="blocked",
-                        summary=decision.summary,
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        block_reason=decision.block_reason or "needs_human_input",
-                        next_user_action=decision.next_user_action,
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "blocked",
+                    decision.summary,
+                    details=decision.details,
+                    block_reason=decision.block_reason or "needs_human_input",
+                    next_user_action=decision.next_user_action,
+                    warnings=current_state.warnings,
                 )
             if decision.status == "failed":
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary=decision.summary,
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                return await finish(
+                    "failed",
+                    decision.summary,
+                    details=decision.details,
+                    warnings=current_state.warnings,
                 )
 
             run_debug.record(
@@ -334,6 +348,10 @@ class ComputerAgentRunner:
 
             await emit_progress(f"Executing step {step_index} ({len(decision.actions)} action(s))")
             for action_index, action in enumerate(decision.actions, start=1):
+                await emit_progress(
+                    f"Step {step_index} action {action_index}/{len(decision.actions)}: "
+                    f"{self._describe_action(action)}"
+                )
                 execution = await asyncio.to_thread(
                     self.executor.execute,
                     current_state,
@@ -342,6 +360,9 @@ class ComputerAgentRunner:
                     source_height=decision.image_height,
                     deadline_monotonic=deadline_monotonic,
                     cancel_event=cancel_event,
+                    progress_callback=lambda message, step_index=step_index, action_index=action_index, action_count=len(decision.actions): emit_progress_from_thread(
+                        f"Step {step_index} action {action_index}/{action_count}: {message}"
+                    ),
                 )
                 run_debug.record(
                     "runner.action_result",
@@ -364,62 +385,52 @@ class ComputerAgentRunner:
                     status = "blocked"
                     if execution.block_reason == "superseded":
                         status = "failed"
-                    return self._finish(
-                        run_debug,
-                        RunResult(
-                            status=status,
-                            summary=execution.message or "The run was interrupted.",
-                            run_id=run_id,
-                            steps_executed=steps_executed,
-                            block_reason=execution.block_reason or "environment_error",
-                            next_user_action=(
-                                None
-                                if execution.block_reason == "superseded"
-                                else "Inspect the desktop and submit a new task from the current screen."
-                            ),
-                            warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
+                    trace_step.execution_status = "failed" if status == "failed" else "blocked"
+                    trace_step.execution_message = execution.message
+                    return await finish(
+                        status,
+                        execution.message or "The run was interrupted.",
+                        block_reason=execution.block_reason or "environment_error",
+                        next_user_action=(
+                            None
+                            if execution.block_reason == "superseded"
+                            else "Inspect the desktop and submit a new task from the current screen."
                         ),
+                        warnings=current_state.warnings,
                     )
                 if execution.status == "failed":
-                    return self._finish(
-                        run_debug,
-                        RunResult(
-                            status="failed",
-                            summary=execution.message or "Failed to execute the planned action.",
-                            run_id=run_id,
-                            steps_executed=steps_executed,
-                            warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                        ),
+                    trace_step.execution_status = "failed"
+                    trace_step.execution_message = execution.message
+                    return await finish(
+                        "failed",
+                        execution.message or "Failed to execute the planned action.",
+                        warnings=current_state.warnings,
                     )
                 steps_executed += 1
 
+            trace_step.execution_status = "ok"
+            trace_step.execution_message = f"Executed {len(decision.actions)} action(s)."
             previous_hash = current_state.image_sha256
             action_signature = self._actions_signature(decision.actions)
             if was_superseded():
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary="Execution stopped because a newer task superseded this run.",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        block_reason="superseded",
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                trace_step.execution_status = "failed"
+                trace_step.execution_message = "Execution stopped because a newer task superseded this run."
+                return await finish(
+                    "failed",
+                    "Execution stopped because a newer task superseded this run.",
+                    block_reason="superseded",
+                    warnings=current_state.warnings,
                 )
-            await emit_progress(f"Capturing screen after step {step_index}")
+            await emit_progress(f"Capturing updated screen after step {step_index}")
             try:
                 current_state = await self._capture_state(request.display_id, run_debug)
             except Exception as exc:
-                return self._finish(
-                    run_debug,
-                    RunResult(
-                        status="failed",
-                        summary=f"Failed to capture the screen after executing an action: {exc}",
-                        run_id=run_id,
-                        steps_executed=steps_executed,
-                        warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-                    ),
+                trace_step.execution_status = "failed"
+                trace_step.execution_message = f"Failed to capture the screen after executing an action: {exc}"
+                return await finish(
+                    "failed",
+                    f"Failed to capture the screen after executing an action: {exc}",
+                    warnings=current_state.warnings,
                 )
 
             if current_state.image_sha256 == previous_hash:
@@ -444,19 +455,114 @@ class ComputerAgentRunner:
             else:
                 state.stalled_action_signature = None
                 state.stalled_count = 0
+            trace_step.resulting_window_title = current_state.active_window_title
+            trace_step.resulting_active_app = current_state.active_app
+            state.history.append(
+                self._format_history_entry(
+                    trace_step,
+                    screen_unchanged=current_state.image_sha256 == previous_hash,
+                    repeat_count=state.stalled_count if current_state.image_sha256 == previous_hash else None,
+                )
+            )
+            await emit_progress(f"Step {step_index} completed")
 
-        return self._finish(
-            run_debug,
-            RunResult(
-                status="blocked",
-                summary=f"Paused after reaching the configured step limit ({max_steps}).",
-                run_id=run_id,
-                steps_executed=steps_executed,
-                block_reason="max_steps",
-                next_user_action="Rerun the task from the current screen if more work is needed.",
-                warnings=list(dict.fromkeys(self.startup_warnings + current_state.warnings)),
-            ),
+        return await finish(
+            "blocked",
+            f"Paused after reaching the configured step limit ({max_steps}).",
+            block_reason="max_steps",
+            next_user_action="Rerun the task from the current screen if more work is needed.",
+            warnings=current_state.warnings,
         )
+
+    async def _plan_step_with_progress(
+        self,
+        *,
+        context: ModelPlanContext,
+        current_state: DesktopState,
+        run_debug: RunDebugRecorder,
+        emit_progress: Callable[[str], Awaitable[None]],
+    ):
+        decision_task = asyncio.create_task(
+            self.model_adapter.plan_step(context, current_state, run_debug)
+        )
+        heartbeat_task = asyncio.create_task(
+            self._model_wait_heartbeat(context.step_index, decision_task, emit_progress)
+        )
+        try:
+            decision = await decision_task
+        finally:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+        await emit_progress(f"Received model decision for step {context.step_index}")
+        return decision
+
+    async def _model_wait_heartbeat(
+        self,
+        step_index: int,
+        decision_task: asyncio.Task,
+        emit_progress: Callable[[str], Awaitable[None]],
+    ) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            if decision_task.done():
+                return
+            await emit_progress(f"Still waiting for vision worker for step {step_index}")
+
+    @staticmethod
+    def _describe_action(action: ComputerAction) -> str:
+        if action.type == "move":
+            return f"move to ({action.x}, {action.y})"
+        if action.type == "click":
+            return f"{action.button} click at ({action.x}, {action.y})"
+        if action.type == "double_click":
+            return f"double click at ({action.x}, {action.y})"
+        if action.type == "right_click":
+            return f"right click at ({action.x}, {action.y})"
+        if action.type == "drag":
+            return (
+                "drag "
+                f"from ({action.from_point.x}, {action.from_point.y}) "
+                f"to ({action.to.x}, {action.to.y})"
+            )
+        if action.type == "scroll":
+            return f"scroll {action.direction} at ({action.x}, {action.y}) by {action.amount}"
+        if action.type == "type":
+            return f"type {len(action.text)} chars"
+        if action.type == "keypress":
+            return "press " + "+".join(action.keys)
+        if action.type == "wait":
+            return f"wait {action.ms}ms"
+        return action.type
+
+    def _format_history_entry(
+        self,
+        trace_step: TraceStep,
+        *,
+        screen_unchanged: bool,
+        repeat_count: int | None,
+    ) -> str:
+        actions_text = "; ".join(self._describe_action(action) for action in trace_step.actions) or "none"
+        lines = [
+            f"Step {trace_step.step_index}",
+        ]
+        if trace_step.observation:
+            lines.append(f"observation: {trace_step.observation}")
+        lines.append(f"summary: {trace_step.summary}")
+        lines.append(f"actions: {actions_text}")
+        if trace_step.expected_outcome:
+            lines.append(f"expected_outcome: {trace_step.expected_outcome}")
+        lines.append(f"execution_status: {trace_step.execution_status or 'unknown'}")
+        if trace_step.execution_message:
+            lines.append(f"execution_message: {trace_step.execution_message}")
+        lines.append(f"resulting_window_title: {trace_step.resulting_window_title or 'unknown'}")
+        lines.append(f"resulting_active_app: {trace_step.resulting_active_app or 'unknown'}")
+        if screen_unchanged:
+            screen_note = "screenshot hash unchanged after this step"
+            if repeat_count and repeat_count > 1:
+                screen_note += f" (repeat_count={repeat_count})"
+            lines.append(f"screen_observation: {screen_note}")
+        return "\n".join(lines)
 
     async def _capture_state(self, display_id: str, run_debug: RunDebugRecorder) -> DesktopState:
         captured = await asyncio.to_thread(

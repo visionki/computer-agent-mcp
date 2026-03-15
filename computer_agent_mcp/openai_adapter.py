@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from base64 import b64encode
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any
 
 from computer_agent_mcp.config import ServerConfig
@@ -38,10 +39,41 @@ class OpenAIResponsesModelAdapter(ModelAdapter):
         debug_recorder: RunDebugRecorder,
     ) -> WorkerDecision:
         user_message = build_worker_user_message(context, state)
-        debug_recorder.write_text(f"step_{context.step_index:02d}_prompt.txt", user_message)
 
         client = self._get_client()
         image_url = f"data:image/png;base64,{b64encode(state.screenshot_png).decode('ascii')}"
+        request_payload = {
+            "model": self.config.openai_model,
+            "instructions": build_worker_instructions(self.config),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_message},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,<omitted>",
+                            "detail": "original",
+                            "image_width": state.display.width_px,
+                            "image_height": state.display.height_px,
+                            "image_sha256": sha256(state.screenshot_png).hexdigest(),
+                        },
+                    ],
+                }
+            ],
+            "request_meta": {
+                "base_url": self.config.openai_base_url,
+                "timeout_seconds": self.config.openai_timeout_seconds,
+                "user_agent": self.config.openai_user_agent,
+                "run_id": context.run_id,
+                "step_index": context.step_index,
+            },
+        }
+        debug_recorder.write_json(
+            f"step_{context.step_index:02d}_request.json",
+            request_payload,
+        )
+
         response = await client.responses.create(
             model=self.config.openai_model,
             instructions=build_worker_instructions(self.config),
@@ -61,10 +93,13 @@ class OpenAIResponsesModelAdapter(ModelAdapter):
         debug_recorder.write_json(
             f"step_{context.step_index:02d}_response.json",
             {
+                "request": request_payload,
                 "response_id": response_dict.get("id"),
-                "text": response_text,
                 "output_types": [item.get("type") for item in response_dict.get("output", [])],
+                "text": response_text,
+                "parsed_decision": payload,
                 "usage": response_dict.get("usage"),
+                "raw_response": response_dict,
             },
         )
         if payload is None:

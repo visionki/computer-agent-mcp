@@ -210,7 +210,11 @@ class DesktopAdapter(ABC):
         count: int = 1,
         check_interrupts: Callable[[], None] | None = None,
     ) -> None:
-        self.move_mouse(display_id, x, y, duration_ms=60, check_interrupts=check_interrupts)
+        # Give the cursor enough travel time to be visible before the click lands.
+        self.move_mouse(display_id, x, y, duration_ms=220, check_interrupts=check_interrupts)
+        if check_interrupts is not None:
+            check_interrupts()
+        time.sleep(0.08)
         descriptor = self.require_display(display_id)
         global_x, global_y = descriptor.local_px_to_global_input(x, y)
         self.event_filter.expect_click(global_x, global_y, button, count=count)
@@ -252,20 +256,24 @@ class DesktopAdapter(ABC):
         display_id: str,
         x: int,
         y: int,
-        delta_x: int,
-        delta_y: int,
+        page_dx: int,
+        page_dy: int,
         check_interrupts: Callable[[], None] | None = None,
     ) -> None:
         self.move_mouse(display_id, x, y, duration_ms=40, check_interrupts=check_interrupts)
         self.event_filter.suppress_scroll(0.25)
-        self._ensure_mouse().scroll(delta_x, delta_y)
+        wheel_x, wheel_y = self._translate_semantic_scroll(page_dx, page_dy)
+        self._ensure_mouse().scroll(wheel_x, wheel_y)
 
     def type_text(self, text: str) -> None:
         keyboard = self._ensure_keyboard()
-        for character in text:
-            self.event_filter.suppress_keyboard(0.08)
-            keyboard.type(character)
-            time.sleep(0.01)
+        if not text:
+            return
+        # Let the backend deliver the whole string as one typing operation.
+        estimated_seconds = max(0.12, min(2.5, (len(text) * 0.05) + 0.2))
+        self.event_filter.suppress_keyboard(estimated_seconds)
+        keyboard.type(text)
+        time.sleep(0.02)
 
     def press_keys(self, keys: list[str]) -> None:
         keyboard = self._ensure_keyboard()
@@ -320,6 +328,11 @@ class DesktopAdapter(ABC):
             return mapping[normalized]
         except KeyError as exc:
             raise ValueError(f"Unsupported mouse button: {button}") from exc
+
+    def _translate_semantic_scroll(self, page_dx: int, page_dy: int) -> tuple[int, int]:
+        # Semantic scroll deltas describe page movement: positive y means scroll down
+        # toward later content. Pynput on Windows expects the opposite wheel sign.
+        return page_dx, -page_dy
 
     def _load_descriptors(self) -> dict[str, DisplayDescriptor]:
         if not self._descriptors:

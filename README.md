@@ -5,8 +5,8 @@
 当前实现的核心思路是：
 
 1. 服务端捕获当前桌面截图
-2. 服务端把任务、短轨迹和最新截图发给内部视觉模型
-3. 模型返回结构化动作，以及它看到的画面尺寸
+2. 服务端把任务、结构化近期执行轨迹和最新截图发给内部视觉模型
+3. 模型基于当前截图返回观察、动作计划、期望结果，以及它看到的画面尺寸
 4. 服务端按模型声明尺寸与真实截图尺寸做坐标换算
 5. 服务端本地执行动作并继续循环
 6. 对外只返回任务级结果，不把截图暴露给外部主 Agent
@@ -73,16 +73,63 @@
   - `blocked`
   - `failed`
 - `summary`
+- `details`
+- `run_id`
 - `steps_executed`
 - `block_reason`
 - `next_user_action`
 - `warnings[]`
+- `trace[]`
+  - `step_index`
+  - `observation`
+  - `summary`
+  - `actions[]`
+  - `expected_outcome`
+  - `execution_status`
+  - `execution_message`
+  - `resulting_window_title`
+
+字段语义：
+
+- `summary`
+  - 简短结果或本轮意图描述
+- `details`
+  - 更完整的最终结果内容
+- `next_user_action`
+  - 仅在 `blocked` 时使用，用于告诉人类下一步该做什么
+- `trace`
+  - 按时间线记录每一轮的：
+    - 当前观察
+    - 本轮意图
+    - 动作
+    - 期望结果
+    - 执行结果
 
 注意：
 
 - 这是无状态接口
 - 每次调用都会从“当前桌面”重新开始
 - 如果上一次被打断，外部需要根据当前画面重新完整描述任务
+- 如果结果是 `block_reason=human_override`，不要直接自动重试；应先询问用户为什么介入、当前画面是否仍可继续，再决定是否重新调用
+- tool result 同时包含：
+  - `structuredContent`
+    - 完整 JSON 结果
+  - `content`
+    - 人类可读摘要，包含 `details` 和完整时间线 trace
+
+### 运行中 progress
+
+长任务执行期间，服务端会持续发送 MCP `notifications/progress`。
+
+典型消息包括：
+
+- `Capturing current screen`
+- `Requesting vision worker for step 1`
+- `Still waiting for vision worker for step 1`
+- `Step 1 action 1/2: wait 1500ms`
+- `Step 1 action 1/2: waiting 1500ms (500/1500ms)`
+- `Capturing updated screen after step 1`
+- `Finished`
 
 ## 运行语义
 
@@ -122,6 +169,7 @@
 - 当前执行会停止
 - 任务返回 `blocked`
 - `block_reason` 为 `human_override`
+- 外部调用方不应无条件自动重试，而应先向用户确认介入原因，以及是否希望从当前画面继续
 
 ## 坐标与图片策略
 
@@ -157,6 +205,9 @@
 
 其中：
 
+- `scroll` 使用语义化方向
+  - `direction="down"` 表示页面向后滚动到更靠后的内容
+  - `direction="up"` 表示页面回到更靠前的内容
 - `type` 会受最大字符数限制
 - `wait` / `type` / 鼠标动作执行过程中都会检查：
   - 人工接管
@@ -198,16 +249,19 @@
 
 - `events.jsonl`
   - 全量事件时间线
+  - 现在也会记录 progress 序列
 - `task.txt`
   - 原始任务描述
 - `run_config.json`
   - 本轮运行配置摘要
 - `result.json`
-  - 最终任务结果
-- `step_XX_prompt.txt`
-  - 发给模型的该轮文本提示
+  - 最终任务结果，包含 trace
+- `step_XX_request.json`
+  - 发给模型的该轮完整请求摘要
+  - 图片 base64 会被占位符替代
 - `step_XX_response.json`
   - 该轮模型响应摘要
+  - 包含解析后的 decision、usage 和 raw response
 - `images/`
   - 原始截图
   - 动作覆盖图

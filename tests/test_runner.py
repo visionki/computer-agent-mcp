@@ -16,6 +16,7 @@ from computer_agent_mcp.models import (
     DisplayInfo,
     InterventionInfo,
     RunResult,
+    WaitAction,
     WorkerDecision,
 )
 from computer_agent_mcp.openai_adapter import ModelAdapter, ModelResponseError
@@ -178,10 +179,10 @@ class FakeAdapter:
             check_interrupts()
         self.actions.append(("drag", from_x, from_y, to_x, to_y, duration_ms))
 
-    def scroll_at(self, display_id: str, x: int, y: int, delta_x: int, delta_y: int, check_interrupts=None) -> None:
+    def scroll_at(self, display_id: str, x: int, y: int, page_dx: int, page_dy: int, check_interrupts=None) -> None:
         if check_interrupts is not None:
             check_interrupts()
-        self.actions.append(("scroll", x, y, delta_x, delta_y))
+        self.actions.append(("scroll", x, y, page_dx, page_dy))
 
     def type_text(self, text: str) -> None:
         self.actions.append(("type", text))
@@ -218,6 +219,9 @@ def make_decision(
     status: str,
     summary: str,
     *,
+    observation: str | None = None,
+    expected_outcome: str | None = None,
+    details: str | None = None,
     actions=None,
     image_width: int = 1000,
     image_height: int = 500,
@@ -227,6 +231,9 @@ def make_decision(
     return WorkerDecision(
         status=status,
         summary=summary,
+        observation=observation,
+        expected_outcome=expected_outcome,
+        details=details,
         image_width=image_width,
         image_height=image_height,
         actions=actions or [],
@@ -270,9 +277,16 @@ def test_runner_completes_after_single_action():
                 make_decision(
                     "act",
                     "Click the search box.",
+                    observation="The page shows a search box.",
+                    expected_outcome="The search box should become focused.",
                     actions=[ClickAction(x=100, y=80)],
                 ),
-                make_decision("completed", "The task is done."),
+                make_decision(
+                    "completed",
+                    "The task is done.",
+                    observation="The task is visibly complete.",
+                    details="Visible success state is shown.",
+                ),
             ]
         )
         runner = make_runner(model, adapter, PassiveMonitor(), monotonic_fn=lambda: 0.0)
@@ -281,6 +295,16 @@ def test_runner_completes_after_single_action():
     result = asyncio.run(scenario())
     assert result.status == "completed"
     assert result.steps_executed == 1
+    assert [step.summary for step in result.trace] == [
+        "Click the search box.",
+        "The task is done.",
+    ]
+    assert result.trace[0].execution_status == "ok"
+    assert result.trace[1].execution_status == "completed"
+    assert result.trace[0].observation == "The page shows a search box."
+    assert result.trace[0].expected_outcome == "The search box should become focused."
+    assert result.details == "Visible success state is shown."
+    assert result.trace[0].resulting_window_title == "Window 2"
 
 
 def test_runner_blocks_when_model_requests_login():
@@ -383,7 +407,7 @@ def test_runner_blocks_on_timeout():
 
     result = asyncio.run(scenario())
     assert result.status == "blocked"
-    assert result.block_reason == "environment_error"
+    assert result.block_reason == "timeout"
 
 
 def test_runner_rejects_busy_second_task():
@@ -437,3 +461,38 @@ def test_runner_rejects_non_positive_max_steps():
     except ValueError:
         return
     raise AssertionError("Expected ComputerTaskArgs to reject non-positive max_steps")
+
+
+def test_runner_reports_progress_and_wait_heartbeat():
+    async def scenario():
+        adapter = FakeAdapter([make_png("blue"), make_png("green")])
+        model = SequenceModel(
+            [
+                make_decision(
+                    "act",
+                    "Wait for the page to load.",
+                    actions=[WaitAction(ms=1200)],
+                ),
+                make_decision("completed", "done"),
+            ]
+        )
+        runner = make_runner(model, adapter, PassiveMonitor(), monotonic_fn=lambda: 0.0)
+        messages: list[str] = []
+
+        async def progress_callback(progress: float, total: float | None, message: str) -> None:
+            messages.append(message)
+
+        result = await runner.run(
+            ComputerTaskArgs(task="Wait for the page"),
+            progress_callback=progress_callback,
+        )
+        return result, messages
+
+    result, messages = asyncio.run(scenario())
+    assert result.status == "completed"
+    assert "Requesting vision worker for step 1" in messages
+    assert "Received model decision for step 1" in messages
+    assert any("Step 1 action 1/1: wait 1200ms" in message for message in messages)
+    assert any("waiting 1200ms (" in message and "/1200ms)" in message for message in messages)
+    assert "Capturing updated screen after step 1" in messages
+    assert messages[-1] == "Finished"

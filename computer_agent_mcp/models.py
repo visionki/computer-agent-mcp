@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TaskStatus = Literal["completed", "blocked", "failed"]
 WorkerStatus = Literal["act", "completed", "blocked", "failed"]
+TraceExecutionStatus = Literal["planned", "ok", "completed", "blocked", "failed"]
 
 
 class Point(BaseModel):
@@ -61,11 +62,13 @@ class ComputerTaskArgs(BaseModel):
 class RunResult(BaseModel):
     status: TaskStatus
     summary: str
+    details: str | None = None
     run_id: str
     steps_executed: int = 0
     block_reason: str | None = None
     next_user_action: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    trace: list["TraceStep"] = Field(default_factory=list)
 
 
 class MoveAction(BaseModel):
@@ -107,8 +110,8 @@ class ScrollAction(BaseModel):
     type: Literal["scroll"] = "scroll"
     x: int
     y: int
-    delta_x: int = 0
-    delta_y: int = 0
+    direction: Literal["up", "down", "left", "right"]
+    amount: int = Field(ge=1)
 
 
 class TypeAction(BaseModel):
@@ -143,6 +146,9 @@ ComputerAction = Annotated[
 class WorkerDecision(BaseModel):
     status: WorkerStatus
     summary: str
+    observation: str | None = None
+    expected_outcome: str | None = None
+    details: str | None = None
     image_width: int = Field(ge=1)
     image_height: int = Field(ge=1)
     actions: list[ComputerAction] = Field(default_factory=list)
@@ -154,9 +160,30 @@ class WorkerDecision(BaseModel):
         if self.status == "act":
             if not self.actions:
                 raise ValueError("status=act requires one or more actions")
+            if self.next_user_action is not None:
+                raise ValueError("next_user_action is only valid for status=blocked")
         elif self.actions:
             raise ValueError("Only status=act may include actions")
+        elif self.expected_outcome is not None:
+            raise ValueError("expected_outcome is only valid for status=act")
+        if self.status != "blocked" and self.next_user_action is not None:
+            raise ValueError("next_user_action is only valid for status=blocked")
         return self
+
+
+class TraceStep(BaseModel):
+    step_index: int = Field(ge=1)
+    observation: str | None = None
+    summary: str
+    expected_outcome: str | None = None
+    actions: list[ComputerAction] = Field(default_factory=list)
+    execution_status: TraceExecutionStatus | None = None
+    execution_message: str | None = None
+    resulting_window_title: str | None = None
+    resulting_active_app: str | None = None
+
+
+RunResult.model_rebuild()
 
 
 class InterventionInfo(BaseModel):

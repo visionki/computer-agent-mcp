@@ -9,7 +9,7 @@ A black-box desktop automation MCP server — give it a task, it handles the scr
 [中文说明](README_CN.md)
 
 <p align="center">
-  <video src="https://github.com/visionki/computer-agent-mcp/raw/main/.github/assets/demo.mp4" width="720" controls></video>
+  <video src="https://github.com/user-attachments/assets/1f61fa7e-2166-49ba-94fa-97913fad5bb2" width="720" controls></video>
 </p>
 
 ## How It Works

@@ -8,6 +8,7 @@ version = "0.1.1"
 description = "Stateless black-box computer-use MCP server powered by a vision worker."
 readme = "README.md"
 requires-python = ">=3.11"
+license = {text = "MIT"}
 keywords = ["mcp", "model-context-protocol", "computer-use", "desktop-automation", "openai"]
 classifiers = [
   "Development Status :: 4 - Beta",

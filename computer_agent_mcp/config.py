@@ -50,7 +50,7 @@ class ServerConfig:
     human_override_enabled: bool = True
     mouse_interrupt_threshold_px: int = 15
     kill_switch_file: str | None = None
-    debug_enabled: bool = True
+    debug_enabled: bool = False
     debug_save_images: bool = True
     debug_dir: str = field(default_factory=_default_debug_dir)
     log_level: str = "INFO"
@@ -79,7 +79,7 @@ class ServerConfig:
                 1, _env_int("COMPUTER_AGENT_MOUSE_INTERRUPT_THRESHOLD_PX", 15)
             ),
             kill_switch_file=os.getenv("COMPUTER_AGENT_KILL_SWITCH_FILE"),
-            debug_enabled=_env_bool("COMPUTER_AGENT_DEBUG", True),
+            debug_enabled=_env_bool("COMPUTER_AGENT_DEBUG", False),
             debug_save_images=_env_bool("COMPUTER_AGENT_DEBUG_SAVE_IMAGES", True),
             debug_dir=os.getenv("COMPUTER_AGENT_DEBUG_DIR", _default_debug_dir()),
             log_level=os.getenv("COMPUTER_AGENT_LOG_LEVEL", "INFO").upper(),

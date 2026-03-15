@@ -28,7 +28,15 @@ def test_config_defaults_use_openai_official_values(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("COMPUTER_AGENT_OPENAI_MODEL", raising=False)
     monkeypatch.delenv("COMPUTER_AGENT_OPENAI_USER_AGENT", raising=False)
+    monkeypatch.delenv("COMPUTER_AGENT_DEBUG", raising=False)
     config = ServerConfig.from_env()
     assert config.openai_base_url == "https://api.openai.com/v1"
     assert config.openai_model == "gpt-5.4"
     assert config.openai_user_agent is None
+    assert config.debug_enabled is False
+
+
+def test_debug_can_be_enabled_from_env(monkeypatch):
+    monkeypatch.setenv("COMPUTER_AGENT_DEBUG", "true")
+    config = ServerConfig.from_env()
+    assert config.debug_enabled is True

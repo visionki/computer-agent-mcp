@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from pathlib import Path
 
 from computer_agent_mcp.platform_base import DesktopAdapter, DisplayDescriptor
 
@@ -26,6 +27,110 @@ class MONITORINFOEXW(ctypes.Structure):
 
 
 MONITORINFOF_PRIMARY = 1
+SPI_SETCURSORS = 0x0057
+IMAGE_CURSOR = 2
+OCR_NORMAL = 32512
+OCR_IBEAM = 32513
+OCR_WAIT = 32514
+OCR_CROSS = 32515
+OCR_UP = 32516
+OCR_SIZENWSE = 32642
+OCR_SIZENESW = 32643
+OCR_SIZEWE = 32644
+OCR_SIZENS = 32645
+OCR_SIZEALL = 32646
+OCR_NO = 32648
+OCR_HAND = 32649
+OCR_APPSTARTING = 32650
+OCR_HELP = 32651
+
+
+class _WindowsControlCursorIndicator:
+    CURSOR_FILE_BY_SYSTEM_ID = {
+        OCR_NORMAL: "normal_select.ani",
+        OCR_IBEAM: "text_select.ani",
+        OCR_WAIT: "wait.ani",
+        OCR_CROSS: "precision_select.ani",
+        OCR_UP: "normal_select.ani",
+        OCR_SIZENWSE: "diagonal_resize_nwse.ani",
+        OCR_SIZENESW: "diagonal_resize_nesw.ani",
+        OCR_SIZEWE: "horizontal_resize.ani",
+        OCR_SIZENS: "vertical_resize.ani",
+        OCR_SIZEALL: "move.ani",
+        OCR_NO: "unavailable.ani",
+        OCR_HAND: "hand_select.ani",
+        OCR_APPSTARTING: "working_in_background.ani",
+        OCR_HELP: "help_select.ani",
+    }
+
+    def __init__(self, asset_dir: Path) -> None:
+        self._asset_dir = asset_dir
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._user32.LoadCursorFromFileW.argtypes = [wintypes.LPCWSTR]
+        self._user32.LoadCursorFromFileW.restype = wintypes.HANDLE
+        self._user32.CopyImage.argtypes = [
+            wintypes.HANDLE,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        self._user32.CopyImage.restype = wintypes.HANDLE
+        self._user32.SetSystemCursor.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self._user32.SetSystemCursor.restype = wintypes.BOOL
+        self._user32.SystemParametersInfoW.argtypes = [
+            wintypes.UINT,
+            wintypes.UINT,
+            wintypes.LPVOID,
+            wintypes.UINT,
+        ]
+        self._user32.SystemParametersInfoW.restype = wintypes.BOOL
+        self._active = False
+
+    def activate(self) -> str | None:
+        if self._active:
+            return None
+        try:
+            for cursor_id, filename in self.CURSOR_FILE_BY_SYSTEM_ID.items():
+                cursor_copy = self._copy_cursor(self._load_cursor_from_file(self._asset_dir / filename))
+                if not cursor_copy:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not self._user32.SetSystemCursor(cursor_copy, cursor_id):
+                    raise ctypes.WinError(ctypes.get_last_error())
+        except Exception as exc:
+            self._restore_best_effort()
+            return f"Failed to activate the Windows AI-control cursor indicator: {exc}"
+        self._active = True
+        return None
+
+    def deactivate(self) -> str | None:
+        if not self._active:
+            return None
+        try:
+            if not self._user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except Exception as exc:
+            return f"Failed to restore the Windows cursor scheme: {exc}"
+        finally:
+            self._active = False
+        return None
+
+    def _load_cursor_from_file(self, cursor_path: Path):
+        if not cursor_path.is_file():
+            raise FileNotFoundError(f"Cursor asset not found: {cursor_path}")
+        cursor = self._user32.LoadCursorFromFileW(str(cursor_path))
+        if not cursor:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return cursor
+
+    def _copy_cursor(self, cursor_handle):
+        return self._user32.CopyImage(cursor_handle, IMAGE_CURSOR, 0, 0, 0)
+
+    def _restore_best_effort(self) -> None:
+        try:
+            self._user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
+        except Exception:
+            pass
 
 
 class WindowsAdapter(DesktopAdapter):
@@ -33,7 +138,25 @@ class WindowsAdapter(DesktopAdapter):
 
     def __init__(self, event_filter):
         super().__init__(event_filter)
+        self._control_cursor_indicator: _WindowsControlCursorIndicator | None = None
         self._set_dpi_awareness()
+
+    @staticmethod
+    def control_cursor_asset_dir() -> Path:
+        return Path(__file__).resolve().parent / "assets" / "cursor"
+
+    def activate_control_cursor(self) -> str | None:
+        try:
+            if self._control_cursor_indicator is None:
+                self._control_cursor_indicator = _WindowsControlCursorIndicator(self.control_cursor_asset_dir())
+            return self._control_cursor_indicator.activate()
+        except Exception as exc:
+            return f"Failed to initialize the Windows AI-control cursor indicator: {exc}"
+
+    def deactivate_control_cursor(self) -> str | None:
+        if self._control_cursor_indicator is None:
+            return None
+        return self._control_cursor_indicator.deactivate()
 
     def _discover_displays(self) -> dict[str, DisplayDescriptor]:
         user32 = ctypes.windll.user32
@@ -108,4 +231,3 @@ class WindowsAdapter(DesktopAdapter):
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
-

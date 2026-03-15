@@ -97,6 +97,12 @@ class DesktopAdapter(ABC):
     def startup_warnings(self) -> list[str]:
         return []
 
+    def activate_control_cursor(self) -> str | None:
+        return None
+
+    def deactivate_control_cursor(self) -> str | None:
+        return None
+
     def list_displays(self) -> list[DisplayInfo]:
         return [descriptor.to_public() for descriptor in self._load_descriptors().values()]
 

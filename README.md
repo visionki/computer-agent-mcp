@@ -199,6 +199,10 @@
 
 - 发送当前截图原图
 - 发给模型的是原始截图，不额外叠加鼠标准心；debug 保存的截图可单独叠加准心辅助排查
+- Windows 默认会在单次 run 期间临时切换系统鼠标样式，用来提示“AI 正在控制”；run 结束后会自动恢复当前用户的光标方案
+- 这套 Windows 控制光标资源默认放在 `computer_agent_mcp/assets/cursor/`，以语义英文文件名组织，例如 `normal_select.ani`、`text_select.ani`、`wait.ani`
+- 如需关闭这项本地提示，可设置 `COMPUTER_AGENT_CONTROL_CURSOR=false`
+- 如果控制光标初始化、资源加载或恢复失败，任务本身不会因此中断；服务端会降级继续执行，并把原因写入 `warnings`
 - 要求模型显式返回：
   - `image_width`
   - `image_height`
@@ -230,6 +234,7 @@
   - `direction="down"` 表示页面向后滚动到更靠后的内容
   - `direction="up"` 表示页面回到更靠前的内容
 - 任何会触发鼠标定位的动作（如 `click` / `drag` / `scroll`）都会先以可见轨迹将指针移动到目标位置，再执行对应动作
+- 上面的“AI 控制中”鼠标指示只作用于本地用户界面提示，不会叠加进发给模型的截图
 - `type` 会受最大字符数限制
 - `wait` / `type` / 鼠标动作执行过程中都会检查：
   - 人工接管

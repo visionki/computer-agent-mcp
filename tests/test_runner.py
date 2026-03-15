@@ -78,11 +78,21 @@ class InterruptingMonitor(PassiveMonitor):
 class FakeAdapter:
     platform_name = "windows"
 
-    def __init__(self, capture_pngs: list[bytes]) -> None:
+    def __init__(
+        self,
+        capture_pngs: list[bytes],
+        *,
+        activate_control_cursor_warning: str | None = None,
+        deactivate_control_cursor_warning: str | None = None,
+    ) -> None:
         self.capture_pngs = list(capture_pngs)
         self.capture_index = 0
         self.capture_include_cursor_args: list[bool] = []
         self.actions: list[tuple] = []
+        self.activate_control_cursor_warning = activate_control_cursor_warning
+        self.deactivate_control_cursor_warning = deactivate_control_cursor_warning
+        self.control_cursor_activations = 0
+        self.control_cursor_deactivations = 0
         self.descriptor = type(
             "Descriptor",
             (),
@@ -141,6 +151,14 @@ class FakeAdapter:
                 "png_bytes": png_bytes,
             },
         )()
+
+    def activate_control_cursor(self) -> str | None:
+        self.control_cursor_activations += 1
+        return self.activate_control_cursor_warning
+
+    def deactivate_control_cursor(self) -> str | None:
+        self.control_cursor_deactivations += 1
+        return self.deactivate_control_cursor_warning
 
     def move_mouse(
         self,
@@ -330,6 +348,56 @@ def test_runner_sends_raw_screenshot_to_model_capture():
     result, adapter = asyncio.run(scenario())
     assert result.status == "completed"
     assert adapter.capture_include_cursor_args == [False]
+
+
+def test_runner_wraps_run_with_control_cursor_lifecycle():
+    async def scenario():
+        adapter = FakeAdapter([make_png("blue")])
+        model = SequenceModel([make_decision("completed", "done")])
+        runner = make_runner(model, adapter, PassiveMonitor(), monotonic_fn=lambda: 0.0)
+        result = await runner.run(ComputerTaskArgs(task="Observe current screen"))
+        return result, adapter
+
+    result, adapter = asyncio.run(scenario())
+    assert result.status == "completed"
+    assert adapter.control_cursor_activations == 1
+    assert adapter.control_cursor_deactivations == 1
+
+
+def test_runner_includes_control_cursor_activation_warning():
+    async def scenario():
+        adapter = FakeAdapter(
+            [make_png("blue")],
+            activate_control_cursor_warning="control cursor unavailable",
+        )
+        model = SequenceModel([make_decision("completed", "done")])
+        runner = make_runner(model, adapter, PassiveMonitor(), monotonic_fn=lambda: 0.0)
+        result = await runner.run(ComputerTaskArgs(task="Observe current screen"))
+        return result, adapter
+
+    result, adapter = asyncio.run(scenario())
+    assert result.status == "completed"
+    assert "control cursor unavailable" in result.warnings
+    assert adapter.control_cursor_activations == 1
+    assert adapter.control_cursor_deactivations == 1
+
+
+def test_runner_includes_control_cursor_restore_warning():
+    async def scenario():
+        adapter = FakeAdapter(
+            [make_png("blue")],
+            deactivate_control_cursor_warning="control cursor restore failed",
+        )
+        model = SequenceModel([make_decision("completed", "done")])
+        runner = make_runner(model, adapter, PassiveMonitor(), monotonic_fn=lambda: 0.0)
+        result = await runner.run(ComputerTaskArgs(task="Observe current screen"))
+        return result, adapter
+
+    result, adapter = asyncio.run(scenario())
+    assert result.status == "completed"
+    assert "control cursor restore failed" in result.warnings
+    assert adapter.control_cursor_activations == 1
+    assert adapter.control_cursor_deactivations == 1
 
 
 def test_runner_blocks_when_model_requests_login():

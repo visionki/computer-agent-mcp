@@ -17,6 +17,12 @@ def test_invalid_bool_uses_default(monkeypatch):
     assert config.human_override_enabled is True
 
 
+def test_control_cursor_can_be_disabled_from_env(monkeypatch):
+    monkeypatch.setenv("COMPUTER_AGENT_CONTROL_CURSOR", "false")
+    config = ServerConfig.from_env()
+    assert config.control_cursor_enabled is False
+
+
 def test_config_defaults_use_openai_official_values(monkeypatch):
     monkeypatch.delenv("COMPUTER_AGENT_OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)

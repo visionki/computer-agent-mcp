@@ -62,12 +62,13 @@ class ComputerTaskArgs(BaseModel):
 class RunResult(BaseModel):
     status: TaskStatus
     summary: str
-    details: str | None = None
+    result: str | None = None
     run_id: str
     steps_executed: int = 0
     block_reason: str | None = None
     next_user_action: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    memory: list[str] = Field(default_factory=list)
     trace: list["TraceStep"] = Field(default_factory=list)
 
 
@@ -147,8 +148,9 @@ class WorkerDecision(BaseModel):
     status: WorkerStatus
     summary: str
     observation: str | None = None
+    memory_update: str | None = None
     expected_outcome: str | None = None
-    details: str | None = None
+    result: str | None = None
     image_width: int = Field(ge=1)
     image_height: int = Field(ge=1)
     actions: list[ComputerAction] = Field(default_factory=list)
@@ -162,6 +164,8 @@ class WorkerDecision(BaseModel):
                 raise ValueError("status=act requires one or more actions")
             if self.next_user_action is not None:
                 raise ValueError("next_user_action is only valid for status=blocked")
+            if self.result is not None:
+                raise ValueError("result is only valid for terminal statuses")
         elif self.actions:
             raise ValueError("Only status=act may include actions")
         elif self.expected_outcome is not None:
@@ -174,6 +178,7 @@ class WorkerDecision(BaseModel):
 class TraceStep(BaseModel):
     step_index: int = Field(ge=1)
     observation: str | None = None
+    memory_update: str | None = None
     summary: str
     expected_outcome: str | None = None
     actions: list[ComputerAction] = Field(default_factory=list)
@@ -213,6 +218,7 @@ class ModelPlanContext:
     step_index: int
     max_steps: int
     recent_history: list[str]
+    accumulated_memory: list[str]
     warnings: list[str]
 
 

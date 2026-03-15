@@ -13,8 +13,9 @@ Schema:
   "status": "act" | "completed" | "blocked" | "failed",
   "summary": "short string",
   "observation": "short string or null",
+  "memory_update": "short string or null",
   "expected_outcome": "short string or null",
-  "details": "string or null",
+  "result": "string or null",
   "image_width": 1234,
   "image_height": 567,
   "actions": [],
@@ -27,11 +28,13 @@ Rules:
 - When status is not "act", actions must be an empty array.
 - Always include observation as a short description of the current visible state in the current screenshot before any new actions run.
 - observation should describe what is currently on screen, not what you expect after the actions.
+- Use memory_update for any new task-relevant information visible in the current screenshot that should be remembered in later steps.
+- memory_update should be incremental. Do not restate the full accumulated memory unless the current screenshot adds it again in a materially new way.
 - Use expected_outcome to describe what the next screenshot should show if the planned action batch works as intended.
 - expected_outcome is for status="act" only.
-- Use details only for richer final task results, especially when status="completed".
+- Use result only for richer task-level output, especially when status="completed".
 - next_user_action is only for status="blocked" and should describe what a human should do next.
-- When status="completed", put any richer result payload in details and set next_user_action to null.
+- When status="completed", put any richer final payload in result and set next_user_action to null.
 - When status="blocked", set next_user_action when a human should take over or provide input.
 - Always include image_width and image_height as the width and height of the image space you are actually using for coordinates in this response.
 - Use only coordinates from that reported image space.
@@ -42,6 +45,8 @@ Rules:
 - After the current action batch finishes, the system will capture the screen again soon and ask for another decision.
 - Only a short automatic settle delay is applied after each action. If navigation, OAuth, menus, tabs, sorting, popups, or other async UI changes may take longer, include an explicit wait action.
 - If a later action depends on UI created by an earlier action, do not assume it is ready immediately. Add wait or leave it for the next step after the next screenshot.
+- If the task requires reading, collecting, comparing, or verifying information that may appear after an action, prefer smaller action batches and re-observe after each meaningful UI change before continuing.
+- Use larger action batches only when intermediate screens do not contain task-relevant information and the goal is mainly navigation.
 - If recent history suggests a similar shortcut-first plan left the screen unchanged, do not repeat that plan. Switch to a different visible-UI strategy.
 - For scroll actions, use direction plus amount as semantic page movement.
 - direction="down" means move the page toward later content; direction="up" means move toward earlier content.
@@ -72,6 +77,7 @@ Allowed actions:
 def build_worker_user_message(context: ModelPlanContext, state: DesktopState) -> str:
     history = context.recent_history[-6:]
     history_text = "\n\n".join(history) if history else "none"
+    memory_text = "\n".join(f"- {item}" for item in context.accumulated_memory) if context.accumulated_memory else "none"
     return f"""Task:
 {context.task}
 
@@ -86,12 +92,16 @@ Current screen:
 - active_window_title: {state.active_window_title or "unknown"}
 - active_app: {state.active_app or "unknown"}
 
+Current accumulated memory:
+{memory_text}
+
 Recent execution history:
 {history_text}
 
 Decide the best next actions from the current screenshot only.
 Treat active_window_title and active_app as hints about whether the target app is already in the foreground.
 Describe the current visible state in observation before choosing actions.
+If the current screenshot adds new task-relevant facts worth keeping, put only the new facts in memory_update.
 If the task is already done, return status="completed".
 If you genuinely need human help or missing information, return status="blocked".
 """

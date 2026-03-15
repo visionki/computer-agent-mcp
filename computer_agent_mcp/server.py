@@ -49,8 +49,8 @@ def _format_run_result_text(result: RunResult) -> str:
     lines = [
         result.summary,
     ]
-    if result.details:
-        lines.extend(["", result.details])
+    if result.result:
+        lines.extend(["", result.result])
     lines.extend(
         [
             "",
@@ -59,6 +59,9 @@ def _format_run_result_text(result: RunResult) -> str:
             f"steps_executed: {result.steps_executed}",
         ]
     )
+    if result.memory:
+        lines.extend(["", "memory:"])
+        lines.extend(f"- {item}" for item in result.memory)
     if result.trace:
         lines.append("trace:")
         for index, trace_step in enumerate(result.trace, start=1):
@@ -67,6 +70,8 @@ def _format_run_result_text(result: RunResult) -> str:
             lines.append(f"Step {trace_step.step_index}")
             if trace_step.observation:
                 lines.append(f"observation: {trace_step.observation}")
+            if trace_step.memory_update:
+                lines.append(f"memory_update: {trace_step.memory_update}")
             lines.append(f"summary: {trace_step.summary}")
             if trace_step.actions:
                 action_text = "; ".join(

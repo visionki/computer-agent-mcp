@@ -35,6 +35,7 @@ class _RunState:
     display_id: str
     max_steps: int
     warnings: list[str]
+    memory: list[str] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
     trace: list[TraceStep] = field(default_factory=list)
     stalled_action_signature: str | None = None
@@ -185,7 +186,7 @@ class ComputerAgentRunner:
             status: str,
             summary: str,
             *,
-            details: str | None = None,
+            result: str | None = None,
             block_reason: str | None = None,
             next_user_action: str | None = None,
             warnings: list[str] | None = None,
@@ -198,12 +199,13 @@ class ComputerAgentRunner:
                 RunResult(
                     status=status,
                     summary=summary,
-                    details=details,
+                    result=result,
                     run_id=run_id,
                     steps_executed=steps_executed,
                     block_reason=block_reason,
                     next_user_action=next_user_action,
                     warnings=dedupe_warnings(warnings or []),
+                    memory=list(state.memory),
                     trace=snapshot_trace(),
                 ),
             )
@@ -249,6 +251,7 @@ class ComputerAgentRunner:
                 step_index=step_index,
                 max_steps=max_steps,
                 recent_history=list(state.history[-6:]),
+                accumulated_memory=list(state.memory),
                 warnings=dedupe_warnings(current_state.warnings),
             )
             await emit_progress(f"Requesting vision worker for step {step_index}")
@@ -289,6 +292,7 @@ class ComputerAgentRunner:
             trace_step = TraceStep(
                 step_index=step_index,
                 observation=decision.observation,
+                memory_update=decision.memory_update,
                 summary=decision.summary,
                 expected_outcome=decision.expected_outcome,
                 actions=[action.model_copy(deep=True) for action in decision.actions],
@@ -297,19 +301,21 @@ class ComputerAgentRunner:
                 resulting_active_app=current_state.active_app,
             )
             state.trace.append(trace_step)
+            if decision.memory_update:
+                state.memory.append(decision.memory_update)
 
             if decision.status == "completed":
                 return await finish(
                     "completed",
                     decision.summary,
-                    details=decision.details,
+                    result=decision.result,
                     warnings=current_state.warnings,
                 )
             if decision.status == "blocked":
                 return await finish(
                     "blocked",
                     decision.summary,
-                    details=decision.details,
+                    result=decision.result,
                     block_reason=decision.block_reason or "needs_human_input",
                     next_user_action=decision.next_user_action,
                     warnings=current_state.warnings,
@@ -318,7 +324,7 @@ class ComputerAgentRunner:
                 return await finish(
                     "failed",
                     decision.summary,
-                    details=decision.details,
+                    result=decision.result,
                     warnings=current_state.warnings,
                 )
 
@@ -548,6 +554,8 @@ class ComputerAgentRunner:
         ]
         if trace_step.observation:
             lines.append(f"observation: {trace_step.observation}")
+        if trace_step.memory_update:
+            lines.append(f"memory_update: {trace_step.memory_update}")
         lines.append(f"summary: {trace_step.summary}")
         lines.append(f"actions: {actions_text}")
         if trace_step.expected_outcome:

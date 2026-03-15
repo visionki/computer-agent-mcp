@@ -220,8 +220,9 @@ def make_decision(
     summary: str,
     *,
     observation: str | None = None,
+    memory_update: str | None = None,
     expected_outcome: str | None = None,
-    details: str | None = None,
+    result: str | None = None,
     actions=None,
     image_width: int = 1000,
     image_height: int = 500,
@@ -232,8 +233,9 @@ def make_decision(
         status=status,
         summary=summary,
         observation=observation,
+        memory_update=memory_update,
         expected_outcome=expected_outcome,
-        details=details,
+        result=result,
         image_width=image_width,
         image_height=image_height,
         actions=actions or [],
@@ -278,6 +280,7 @@ def test_runner_completes_after_single_action():
                     "act",
                     "Click the search box.",
                     observation="The page shows a search box.",
+                    memory_update="The target page shows a visible search box.",
                     expected_outcome="The search box should become focused.",
                     actions=[ClickAction(x=100, y=80)],
                 ),
@@ -285,7 +288,8 @@ def test_runner_completes_after_single_action():
                     "completed",
                     "The task is done.",
                     observation="The task is visibly complete.",
-                    details="Visible success state is shown.",
+                    memory_update="The success state is now visible on screen.",
+                    result="Visible success state is shown.",
                 ),
             ]
         )
@@ -302,8 +306,14 @@ def test_runner_completes_after_single_action():
     assert result.trace[0].execution_status == "ok"
     assert result.trace[1].execution_status == "completed"
     assert result.trace[0].observation == "The page shows a search box."
+    assert result.trace[0].memory_update == "The target page shows a visible search box."
     assert result.trace[0].expected_outcome == "The search box should become focused."
-    assert result.details == "Visible success state is shown."
+    assert result.trace[1].memory_update == "The success state is now visible on screen."
+    assert result.result == "Visible success state is shown."
+    assert result.memory == [
+        "The target page shows a visible search box.",
+        "The success state is now visible on screen.",
+    ]
     assert result.trace[0].resulting_window_title == "Window 2"
 
 
@@ -461,6 +471,19 @@ def test_runner_rejects_non_positive_max_steps():
     except ValueError:
         return
     raise AssertionError("Expected ComputerTaskArgs to reject non-positive max_steps")
+
+
+def test_worker_decision_rejects_result_for_act_status():
+    try:
+        make_decision(
+            "act",
+            "Do something",
+            result="This should only appear at the end.",
+            actions=[ClickAction(x=100, y=80)],
+        )
+    except ValueError:
+        return
+    raise AssertionError("Expected WorkerDecision to reject result for status=act")
 
 
 def test_runner_reports_progress_and_wait_heartbeat():

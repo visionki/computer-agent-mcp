@@ -68,6 +68,13 @@ class OpenAIResponsesModelAdapter(ModelAdapter):
                 "run_id": context.run_id,
                 "step_index": context.step_index,
             },
+            "context_meta": {
+                "task": context.task,
+                "recent_history": context.recent_history,
+                "accumulated_memory": context.accumulated_memory,
+                "active_window_title": state.active_window_title,
+                "active_app": state.active_app,
+            },
         }
         debug_recorder.write_json(
             f"step_{context.step_index:02d}_request.json",

@@ -5,8 +5,8 @@
 当前实现的核心思路是：
 
 1. 服务端捕获当前桌面截图
-2. 服务端把任务、结构化近期执行轨迹和最新截图发给内部视觉模型
-3. 模型基于当前截图返回观察、动作计划、期望结果，以及它看到的画面尺寸
+2. 服务端把任务、结构化近期执行轨迹、累计过程记忆和最新截图发给内部视觉模型
+3. 模型基于当前截图返回观察、过程记忆增量、动作计划、期望结果，以及它看到的画面尺寸
 4. 服务端按模型声明尺寸与真实截图尺寸做坐标换算
 5. 服务端本地执行动作并继续循环
 6. 对外只返回任务级结果，不把截图暴露给外部主 Agent
@@ -21,6 +21,7 @@
 - 服务端不提供 `resume` / `continuation_token`
 - 新任务会抢占旧任务
 - 内部默认使用 `Responses API + message + vision`，而不是原生 `computer` tool
+- 单次 run 内会维护累计 memory，但不会跨调用持久化
 - 模型需要返回它实际使用的 `image_width` / `image_height`
 - 服务端据此做坐标缩放
 - 允许模型在单轮返回多动作 batch
@@ -73,15 +74,17 @@
   - `blocked`
   - `failed`
 - `summary`
-- `details`
+- `result`
 - `run_id`
 - `steps_executed`
 - `block_reason`
 - `next_user_action`
 - `warnings[]`
+- `memory[]`
 - `trace[]`
   - `step_index`
   - `observation`
+  - `memory_update`
   - `summary`
   - `actions[]`
   - `expected_outcome`
@@ -93,13 +96,17 @@
 
 - `summary`
   - 简短结果或本轮意图描述
-- `details`
-  - 更完整的最终结果内容
+- `result`
+  - 更完整的最终交付内容
+- `memory`
+  - 单次 run 内累计得到的过程记忆
+  - 例如已收集到的评论原文、候选项、标题、金额、页面要点
 - `next_user_action`
   - 仅在 `blocked` 时使用，用于告诉人类下一步该做什么
 - `trace`
   - 按时间线记录每一轮的：
     - 当前观察
+    - 本轮新增记忆
     - 本轮意图
     - 动作
     - 期望结果
@@ -109,13 +116,14 @@
 
 - 这是无状态接口
 - 每次调用都会从“当前桌面”重新开始
+- 服务端不会跨调用保留截图、history 或 memory
 - 如果上一次被打断，外部需要根据当前画面重新完整描述任务
 - 如果结果是 `block_reason=human_override`，不要直接自动重试；应先询问用户为什么介入、当前画面是否仍可继续，再决定是否重新调用
 - tool result 同时包含：
   - `structuredContent`
     - 完整 JSON 结果
   - `content`
-    - 人类可读摘要，包含 `details` 和完整时间线 trace
+    - 人类可读摘要，包含 `result`、累计 `memory` 和完整时间线 trace
 
 ### 运行中 progress
 
@@ -141,7 +149,17 @@
 
 - 不要假设有 resume
 - 不要假设会记住旧截图
+- 不要假设会跨调用记住旧 memory
 - 每次调用都必须给完整任务目标
+
+但在单次 run 内，服务端会维护两类内部状态：
+
+- `history`
+  - 近期执行轨迹，告诉模型前几步做了什么
+- `memory`
+  - 本轮任务过程中累计得到的任务相关信息
+  - 每轮模型只返回新增的 `memory_update`
+  - 服务端负责追加并在下一轮继续带回模型
 
 ### 新任务抢占旧任务
 
@@ -161,6 +179,8 @@
 - 服务端按顺序执行
 - 一旦其中某个动作失败/超时/被人工打断，后续动作不再执行
 - 执行完当前批次后再重新截图进入下一轮
+
+当任务目标依赖中间画面的信息读取、收集、比较或验证时，提示词会明确要求模型优先采用更小的动作批次，避免一次跳过多个可能有信息价值的中间状态。
 
 ### 人工优先
 
@@ -255,10 +275,11 @@
 - `run_config.json`
   - 本轮运行配置摘要
 - `result.json`
-  - 最终任务结果，包含 trace
+  - 最终任务结果，包含 `result`、累计 `memory` 和 trace
 - `step_XX_request.json`
   - 发给模型的该轮完整请求摘要
   - 图片 base64 会被占位符替代
+  - 包含最近 history 和当前累计 memory
 - `step_XX_response.json`
   - 该轮模型响应摘要
   - 包含解析后的 decision、usage 和 raw response

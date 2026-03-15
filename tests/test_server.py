@@ -27,13 +27,18 @@ def test_format_run_result_text_includes_trace():
         RunResult(
             status="completed",
             summary="已打开目标页面",
-            details="页面显示成功结果。",
+            result="页面显示成功结果。",
             run_id="run123",
             steps_executed=2,
+            memory=[
+                "已看到搜索框。",
+                "已确认页面成功状态。",
+            ],
             trace=[
                 TraceStep(
                     step_index=1,
                     observation="页面上可见搜索框。",
+                    memory_update="记录搜索框位置。",
                     summary="点击搜索框",
                     expected_outcome="搜索框将获得焦点。",
                     actions=[ClickAction(x=100, y=80)],
@@ -56,8 +61,11 @@ def test_format_run_result_text_includes_trace():
     assert "页面显示成功结果。" in text
     assert "run_id: run123" in text
     assert "steps_executed: 2" in text
+    assert "memory:" in text
+    assert "- 已看到搜索框。" in text
     assert "Step 1" in text
     assert "observation: 页面上可见搜索框。" in text
+    assert "memory_update: 记录搜索框位置。" in text
     assert "summary: 点击搜索框" in text
     assert "actions: left click at (100, 80)" in text
     assert "expected_outcome: 搜索框将获得焦点。" in text

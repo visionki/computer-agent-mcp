@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from io import BytesIO
-from math import hypot
 import time
 from typing import Callable
 
@@ -78,6 +77,13 @@ class CapturedDisplayState:
 
 
 class DesktopAdapter(ABC):
+    MIN_VISIBLE_MOUSE_MOVE_MS = 120
+    POINTER_APPROACH_DURATIONS_MS = {
+        "click": 220,
+        "drag": 180,
+        "scroll": 180,
+    }
+
     def __init__(self, event_filter: SyntheticEventFilter):
         self.event_filter = event_filter
         self._descriptors: dict[str, DisplayDescriptor] = {}
@@ -187,9 +193,16 @@ class DesktopAdapter(ABC):
         descriptor = self.require_display(display_id)
         target_x, target_y = descriptor.local_px_to_global_input(x, y)
         mouse = self._ensure_mouse()
-        duration_s = max(0.0, duration_ms / 1000)
-        self.event_filter.suppress_mouse_moves(duration_s + 0.25)
         start_x, start_y = mouse.position
+        effective_duration_ms = self._effective_mouse_move_duration_ms(
+            start_x=start_x,
+            start_y=start_y,
+            target_x=target_x,
+            target_y=target_y,
+            requested_duration_ms=duration_ms,
+        )
+        duration_s = max(0.0, effective_duration_ms / 1000)
+        self.event_filter.suppress_mouse_moves(duration_s + 0.25)
         steps = max(1, int(duration_s / 0.01)) if duration_s else 1
         for step in range(1, steps + 1):
             if check_interrupts is not None:
@@ -210,8 +223,7 @@ class DesktopAdapter(ABC):
         count: int = 1,
         check_interrupts: Callable[[], None] | None = None,
     ) -> None:
-        # Give the cursor enough travel time to be visible before the click lands.
-        self.move_mouse(display_id, x, y, duration_ms=220, check_interrupts=check_interrupts)
+        self._approach_pointer(display_id, x, y, action="click", check_interrupts=check_interrupts)
         if check_interrupts is not None:
             check_interrupts()
         time.sleep(0.08)
@@ -234,7 +246,7 @@ class DesktopAdapter(ABC):
         descriptor = self.require_display(display_id)
         start_x, start_y = descriptor.local_px_to_global_input(from_x, from_y)
         end_x, end_y = descriptor.local_px_to_global_input(to_x, to_y)
-        self.move_mouse(display_id, from_x, from_y, duration_ms=60, check_interrupts=check_interrupts)
+        self._approach_pointer(display_id, from_x, from_y, action="drag", check_interrupts=check_interrupts)
         self.event_filter.expect_click(start_x, start_y, "left")
         self.event_filter.suppress_mouse_moves((duration_ms / 1000) + 0.3)
         mouse.press(self._resolve_button("left"))
@@ -260,7 +272,7 @@ class DesktopAdapter(ABC):
         page_dy: int,
         check_interrupts: Callable[[], None] | None = None,
     ) -> None:
-        self.move_mouse(display_id, x, y, duration_ms=40, check_interrupts=check_interrupts)
+        self._approach_pointer(display_id, x, y, action="scroll", check_interrupts=check_interrupts)
         self.event_filter.suppress_scroll(0.25)
         wheel_x, wheel_y = self._translate_semantic_scroll(page_dx, page_dy)
         self._ensure_mouse().scroll(wheel_x, wheel_y)
@@ -333,6 +345,37 @@ class DesktopAdapter(ABC):
         # Semantic scroll deltas describe page movement: positive y means scroll down
         # toward later content. Pynput on Windows expects the opposite wheel sign.
         return page_dx, -page_dy
+
+    def _approach_pointer(
+        self,
+        display_id: str,
+        x: int,
+        y: int,
+        *,
+        action: str,
+        check_interrupts: Callable[[], None] | None = None,
+    ) -> None:
+        duration_ms = self.POINTER_APPROACH_DURATIONS_MS[action]
+        self.move_mouse(
+            display_id,
+            x,
+            y,
+            duration_ms=duration_ms,
+            check_interrupts=check_interrupts,
+        )
+
+    def _effective_mouse_move_duration_ms(
+        self,
+        *,
+        start_x: float,
+        start_y: float,
+        target_x: float,
+        target_y: float,
+        requested_duration_ms: int,
+    ) -> int:
+        if start_x == target_x and start_y == target_y:
+            return 0
+        return max(requested_duration_ms, self.MIN_VISIBLE_MOUSE_MOVE_MS)
 
     def _load_descriptors(self) -> dict[str, DisplayDescriptor]:
         if not self._descriptors:

@@ -81,6 +81,7 @@ class FakeAdapter:
     def __init__(self, capture_pngs: list[bytes]) -> None:
         self.capture_pngs = list(capture_pngs)
         self.capture_index = 0
+        self.capture_include_cursor_args: list[bool] = []
         self.actions: list[tuple] = []
         self.descriptor = type(
             "Descriptor",
@@ -125,6 +126,7 @@ class FakeAdapter:
         return self.descriptor
 
     def capture_display(self, display_id: str, include_cursor: bool):
+        self.capture_include_cursor_args.append(include_cursor)
         index = min(self.capture_index, len(self.capture_pngs) - 1)
         png_bytes = self.capture_pngs[index]
         self.capture_index += 1
@@ -315,6 +317,19 @@ def test_runner_completes_after_single_action():
         "The success state is now visible on screen.",
     ]
     assert result.trace[0].resulting_window_title == "Window 2"
+
+
+def test_runner_sends_raw_screenshot_to_model_capture():
+    async def scenario():
+        adapter = FakeAdapter([make_png("blue")])
+        model = SequenceModel([make_decision("completed", "done")])
+        runner = make_runner(model, adapter, PassiveMonitor(), monotonic_fn=lambda: 0.0)
+        result = await runner.run(ComputerTaskArgs(task="Observe current screen"))
+        return result, adapter
+
+    result, adapter = asyncio.run(scenario())
+    assert result.status == "completed"
+    assert adapter.capture_include_cursor_args == [False]
 
 
 def test_runner_blocks_when_model_requests_login():

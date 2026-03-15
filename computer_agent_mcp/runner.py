@@ -576,7 +576,7 @@ class ComputerAgentRunner:
         captured = await asyncio.to_thread(
             self.adapter.capture_display,
             display_id,
-            self.config.include_cursor_by_default,
+            False,
         )
         state = DesktopState(
             display_id=display_id,
@@ -598,13 +598,27 @@ class ComputerAgentRunner:
                 "active_app": state.active_app,
                 "warnings": state.warnings,
             },
-            image_bytes=state.screenshot_png,
+            image_bytes=self._debug_capture_image(state),
         )
         return state
 
     def _actions_signature(self, actions: list[ComputerAction]) -> str:
         payload = [action.model_dump(mode="json", by_alias=True) for action in actions]
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _debug_capture_image(self, state: DesktopState) -> bytes:
+        if not self.config.debug_include_cursor_overlay or state.cursor is None or not state.cursor.visible:
+            return state.screenshot_png
+        image = Image.open(BytesIO(state.screenshot_png)).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        x, y = state.cursor.x, state.cursor.y
+        radius = 10
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline="red", width=3)
+        draw.line((x - 14, y, x + 14, y), fill="red", width=2)
+        draw.line((x, y - 14, x, y + 14), fill="red", width=2)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
 
     def _actions_overlay(
         self,

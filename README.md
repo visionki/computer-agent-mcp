@@ -198,6 +198,7 @@
 取而代之的是：
 
 - 发送当前截图原图
+- 发给模型的是原始截图，不额外叠加鼠标准心；debug 保存的截图可单独叠加准心辅助排查
 - 要求模型显式返回：
   - `image_width`
   - `image_height`
@@ -228,6 +229,7 @@
 - `scroll` 使用语义化方向
   - `direction="down"` 表示页面向后滚动到更靠后的内容
   - `direction="up"` 表示页面回到更靠前的内容
+- 任何会触发鼠标定位的动作（如 `click` / `drag` / `scroll`）都会先以可见轨迹将指针移动到目标位置，再执行对应动作
 - `type` 会受最大字符数限制
 - `wait` / `type` / 鼠标动作执行过程中都会检查：
   - 人工接管
@@ -361,7 +363,7 @@ python -m computer_agent_mcp \
 - `COMPUTER_AGENT_MAX_TYPE_CHARS`
 - `COMPUTER_AGENT_DEFAULT_PAUSE_MS`
 - `COMPUTER_AGENT_POST_ACTION_WAIT_MS`
-- `COMPUTER_AGENT_INCLUDE_CURSOR`
+- `COMPUTER_AGENT_DEBUG_INCLUDE_CURSOR`
 - `COMPUTER_AGENT_HUMAN_OVERRIDE`
 - `COMPUTER_AGENT_MOUSE_INTERRUPT_THRESHOLD_PX`
 - `COMPUTER_AGENT_KILL_SWITCH_FILE`

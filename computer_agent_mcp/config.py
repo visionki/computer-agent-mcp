@@ -45,7 +45,7 @@ class ServerConfig:
     max_type_chars: int = 200
     default_pause_between_ms: int = 80
     post_action_wait_ms: int = 500
-    include_cursor_by_default: bool = True
+    debug_include_cursor_overlay: bool = True
     human_override_enabled: bool = True
     mouse_interrupt_threshold_px: int = 15
     kill_switch_file: str | None = None
@@ -71,7 +71,7 @@ class ServerConfig:
             max_type_chars=max(1, _env_int("COMPUTER_AGENT_MAX_TYPE_CHARS", 200)),
             default_pause_between_ms=max(0, _env_int("COMPUTER_AGENT_DEFAULT_PAUSE_MS", 80)),
             post_action_wait_ms=max(0, _env_int("COMPUTER_AGENT_POST_ACTION_WAIT_MS", 500)),
-            include_cursor_by_default=_env_bool("COMPUTER_AGENT_INCLUDE_CURSOR", True),
+            debug_include_cursor_overlay=_env_bool("COMPUTER_AGENT_DEBUG_INCLUDE_CURSOR", True),
             human_override_enabled=_env_bool("COMPUTER_AGENT_HUMAN_OVERRIDE", True),
             mouse_interrupt_threshold_px=max(
                 1, _env_int("COMPUTER_AGENT_MOUSE_INTERRUPT_THRESHOLD_PX", 15)
